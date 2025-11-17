@@ -217,6 +217,89 @@ def generate_line2_script(news_input_dict, model):
             print(f"Safety Feedback: {response.prompt_feedback}")
         return None
 
+def extract_nate_body(container) -> str:
+    """
+    nate 기사 본문 추출 (태그 구조와 무관하게 텍스트 기준으로 처리)
+    - realArtcContents / realArtContents 안의 모든 텍스트를 순회
+    - 첫 '사진=...' 캡션은 스킵
+    - 기자/홍보/저작권/추천기사 패턴이 나오면 거기서 끝냄
+    """
+    lines = []
+    saw_first_photo_caption = False
+
+    # 하단부 끝내는 패턴들
+    END_PATTERNS = [
+        "MBN 화제뉴스",
+        "네이버에서 'MBN뉴스'",
+        "Make a Better Next, MBN",
+        "MBN 무료 고화질 온에어 서비스 GO!",
+        "MBN(www.mbn.co.kr)",
+        "무단전재 및 재배포 금지",
+        "< Copyright",
+        "Copyright ⓒ",
+    ]
+
+    for raw in container.stripped_strings:
+        txt = re.sub(r"\s+", " ", raw).strip()
+        if not txt:
+            continue
+
+        # 1) 첫 사진 캡션은 스킵
+        if "사진" in txt and not saw_first_photo_caption:
+            saw_first_photo_caption = True
+            continue
+
+        # 2) 두 번째 '사진'부터는 본문이 아니라 기타 캡션일 가능성이 높아서 끊기
+        if "사진" in txt and saw_first_photo_caption:
+            break
+
+        # 3) 기자 + 이메일 라인 → 여기서 본문 끝
+        if "기자" in txt and "@" in txt:
+            # print(f"[STOP at reporter line] {txt}")
+            break
+
+        # 4) 하단 홍보/저작권 패턴 → 여기서 본문 끝
+        if any(pat in txt for pat in END_PATTERNS):
+            # print(f"[STOP at footer pattern] {txt}")
+            break
+
+        # 5) 추천 기사 리스트 (▶ 로 시작하는 라인) → 여기서 끝내버림
+        if txt.startswith("▶"):
+            # print(f"[STOP at recommended article] {txt}")
+            break
+
+        # 정상 본문
+        lines.append(txt)
+
+    return " ".join(lines)
+
+def debug_nate_article_body():
+    link = "https://news.nate.com/view/20251117n08540?mid=n1006"
+    print("\n=== [DEBUG] nate 기사 본문 전문 테스트 ===")
+    print("[링크]", link)
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        )
+    }
+
+    resp = requests.get(link, headers=headers)
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    container = soup.find(id="realArtcContents") or soup.find(id="realArtContents")
+    if not container:
+        print("[DEBUG] 본문 컨테이너 못 찾음")
+        return
+
+    print("\n=== [DEBUG] extract_nate_body() 결과 ===")
+    body = extract_nate_body(container)
+    print(body)
+    print("========================================")
+
 
 # --- 5. 메인 ---
 if __name__ == "__main__":
@@ -226,7 +309,8 @@ if __name__ == "__main__":
 
     # 1단계: 데이터 수집
     api_data = scrape_signal_api()
-
+    debug_nate_article_body()
+    exit()
     if api_data:
         # 모델 설정
         json_config = {"response_mime_type": "application/json"}

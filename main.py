@@ -5,9 +5,10 @@ import json
 import google.generativeai as genai
 import os
 import time
+from urllib.parse import urlparse
 
 # --- 1. Gemini API 키 설정 (직접 입력 방식) ---
-API_KEY = "AIzaSyADiUpiFrcs3zBaWHAwwWLywTRP8HrXf1E"  # 🔑 여기에 실제 키 입력
+API_KEY = "AIzaSyDMzNnRdOY5GLZQpo4Sha1r4en1mtCFfHU"  # 🔑 여기에 실제 키 입력
 
 try:
     if API_KEY == "YOUR_API_KEY_HERE" or not API_KEY:
@@ -67,7 +68,16 @@ def _merge_and_trim(base: str, extra: str, max_len: int = 380) -> str:
 
 def enrich_snippet_by_link(link: str, fallback_desc: str) -> str:
     """
-    기사 링크의 HTML을 직접 열어 meta 태그/첫 문단을 긁어와 desc를 보강.
+    기사 링크의 HTML을 직접 열어 meta 태그/본문을 긁어와 desc를 보강.
+
+    - news.nate.com:
+        * div#realArtcContents / div#realArtContents 안의 텍스트를
+          extract_nate_body()로 추출해서 사용
+    - 그 외:
+        * og:description
+        * meta[name="description"]
+        * 첫 번째 <p>
+      순으로 사용
     """
     fallback_desc = fallback_desc or ""
     if not link:
@@ -79,7 +89,7 @@ def enrich_snippet_by_link(link: str, fallback_desc: str) -> str:
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/120.0.0.0 Safari/537.36"
         ),
-        "Referer": "https://www.google.com/"
+        "Referer": "https://www.google.com/",
     }
 
     try:
@@ -91,7 +101,18 @@ def enrich_snippet_by_link(link: str, fallback_desc: str) -> str:
 
     try:
         soup = BeautifulSoup(resp.text, "html.parser")
+        domain = urlparse(link).netloc
 
+        # 🔹 nate 뉴스: 기사 본문 전체 활용
+        if "news.nate.com" in domain:
+            container = soup.find(id="realArtcContents") or soup.find(id="realArtContents")
+            if container:
+                body_text = extract_nate_body(container)
+                if body_text:
+                    # nate는 기사 전문이니 길이 여유 조금 더 줌
+                    return _merge_and_trim(fallback_desc, body_text, max_len=700)
+
+        # 🔹 그 외 사이트: 메타 태그 기반 요약
         # 1) og:description 최우선
         og = soup.find("meta", attrs={"property": "og:description"})
         if og and og.get("content"):
@@ -273,34 +294,6 @@ def extract_nate_body(container) -> str:
 
     return " ".join(lines)
 
-def debug_nate_article_body():
-    link = "https://news.nate.com/view/20251117n08540?mid=n1006"
-    print("\n=== [DEBUG] nate 기사 본문 전문 테스트 ===")
-    print("[링크]", link)
-
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        )
-    }
-
-    resp = requests.get(link, headers=headers)
-    resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
-
-    container = soup.find(id="realArtcContents") or soup.find(id="realArtContents")
-    if not container:
-        print("[DEBUG] 본문 컨테이너 못 찾음")
-        return
-
-    print("\n=== [DEBUG] extract_nate_body() 결과 ===")
-    body = extract_nate_body(container)
-    print(body)
-    print("========================================")
-
-
 # --- 5. 메인 ---
 if __name__ == "__main__":
 
@@ -309,8 +302,6 @@ if __name__ == "__main__":
 
     # 1단계: 데이터 수집
     api_data = scrape_signal_api()
-    debug_nate_article_body()
-    exit()
     if api_data:
         # 모델 설정
         json_config = {"response_mime_type": "application/json"}
@@ -355,7 +346,9 @@ if __name__ == "__main__":
 
                 # 🔥 여기서 스니펫 보강
                 enriched = enrich_snippet_by_link(link, raw_desc)
-
+                print("\n[DEBUG] 제목:", item.get('title', '')[:40])
+                print("[DEBUG] 원본 desc:", raw_desc)
+                print("[DEBUG] 보강된 snippet:", enriched[:300])
                 news_input = {
                     "title": item.get('title', ''),
                     "snippet": enriched

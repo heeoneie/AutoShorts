@@ -29,7 +29,7 @@ def save_json(data: Any, filepath: str) -> None:
     print(f"✅ 저장 완료: {filepath}")
 
 
-def extract_keywords(top10_data: List[Dict[str, Any]], count: int = 10) -> List[str]:
+def extract_keywords(top10_data: List[dict[str, Any]], count: int = 10) -> List[str]:
     """
     Extract keyword list from top10 API data.
 

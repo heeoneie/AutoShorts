@@ -4,6 +4,15 @@ import requests
 import json
 import os
 from urllib.parse import urlparse
+from dotenv import load_dotenv
+
+# 환경변수 로드
+load_dotenv()
+
+# Firecrawl 설정
+FIRECRAWL_API_KEY = os.getenv("FIRECRAWL_API_KEY")
+FIRECRAWL_API_URL = "https://api.firecrawl.dev/v1/scrape"
+
 
 # =========================
 # 1. signal.bz API 호출
@@ -21,7 +30,7 @@ def scrape_signal_api():
         "Referer": "https://www.signal.bz/",
     }
     try:
-        print("--- 1단계: API에서 'top10'과 'articles' 가져오기... ---")
+        print("--- API에서 데이터 가져오는 중... ---")
         response = requests.get(api_url, headers=headers, timeout=5)
         response.raise_for_status()
         data = response.json()
@@ -33,82 +42,103 @@ def scrape_signal_api():
 
 
 # =========================
-# 2. 텍스트 유틸
+# 2. 텍스트 후처리
 # =========================
 
-def _clean_text(t: str) -> str:
-    if not t:
+# 제거할 UI/불필요 패턴
+REMOVE_PATTERNS = [
+    r"본문 바로가기",
+    r"광고 영역",
+    r"랭킹뉴스.*?공감순",
+    r"공유하기.*?URL복사",
+    r"_AI_\s*챗.*?기다려주세요\.",
+    r"네이트온|페이스북|엑스|카카오",
+    r"가\s*_\d_\s*(작게|보통|크게|아주 크게|가장 크게)",
+    r"전체 내용을 이해하기 위해서는.*?확인하는 것이 더 좋습니다\.",
+    r"기사 제목과 본문 내용을 자동 요약한 내용입니다\.",
+    r"원문기사전송.*?\d{4}-\d{2}-\d{2}",
+    r"최종수정.*?\d{4}-\d{2}-\d{2}",
+    r"\d+\s*-\s*\d+",  # 조회수/댓글수 패턴
+    r"무단전재 및 재배포 금지",
+    r"Copyright\s*ⓒ.*",
+    r"< Copyright.*?>",
+    r"▶.*",  # 추천기사
+    r"조선닷컴 핫 뉴스 Best.*",
+    r"\[.*?기자\]",
+    r"기자\s*[\w.]+@[\w.]+",  # 기자 이메일
+]
+
+
+def clean_article_text(text: str) -> str:
+    """기사 본문에서 불필요한 UI 요소 및 패턴 제거"""
+    if not text:
         return ""
-    t = re.sub(r"\s+", " ", t).strip()
-    return t
+
+    # 패턴 제거
+    for pattern in REMOVE_PATTERNS:
+        text = re.sub(pattern, "", text, flags=re.IGNORECASE | re.DOTALL)
+
+    # 연속 공백 정리
+    text = re.sub(r"\s+", " ", text).strip()
+
+    # 너무 짧은 문장 조각 제거 (3글자 이하)
+    sentences = text.split(".")
+    sentences = [s.strip() for s in sentences if len(s.strip()) > 3]
+    text = ". ".join(sentences)
+
+    return text
 
 
 # =========================
-# 3. NATE 전용 본문 추출
+# 3. Firecrawl API로 기사 본문 추출
 # =========================
 
-def extract_nate_body(container) -> str:
-    """
-    nate 기사 본문 추출 (태그 구조와 무관하게 텍스트 기준으로 처리)
-    - realArtcContents / realArtContents 안의 모든 텍스트를 순회
-    - 첫 '사진=...' 캡션은 스킵
-    - 기자/홍보/저작권/추천기사 패턴이 나오면 거기서 끝냄
-    """
-    lines = []
-    saw_first_photo_caption = False
+def scrape_with_firecrawl(url: str) -> str:
+    """Firecrawl API를 사용해 기사 본문을 추출"""
+    if not FIRECRAWL_API_KEY:
+        return ""
 
-    END_PATTERNS = [
-        "MBN 화제뉴스",
-        "네이버에서 'MBN뉴스'",
-        "Make a Better Next, MBN",
-        "MBN 무료 고화질 온에어 서비스 GO!",
-        "MBN(www.mbn.co.kr)",
-        "무단전재 및 재배포 금지",
-        "< Copyright",
-        "Copyright ⓒ",
-    ]
+    headers = {
+        "Authorization": f"Bearer {FIRECRAWL_API_KEY}",
+        "Content-Type": "application/json"
+    }
 
-    for raw in container.stripped_strings:
-        txt = re.sub(r"\s+", " ", raw).strip()
-        if not txt:
-            continue
+    payload = {
+        "url": url,
+        "formats": ["markdown"],
+        "onlyMainContent": True,
+        "timeout": 30000
+    }
 
-        # 1) 첫 사진 캡션은 스킵
-        if "사진" in txt and not saw_first_photo_caption:
-            saw_first_photo_caption = True
-            continue
+    try:
+        resp = requests.post(
+            FIRECRAWL_API_URL,
+            headers=headers,
+            json=payload,
+            timeout=35
+        )
+        resp.raise_for_status()
+        data = resp.json()
 
-        # 2) 두 번째 '사진' 나오면 이후는 캡션/기타일 확률 높아서 종료
-        if "사진" in txt and saw_first_photo_caption:
-            break
+        if data.get("success"):
+            markdown = data.get("data", {}).get("markdown", "")
+            # 마크다운에서 텍스트만 추출
+            text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', markdown)
+            text = re.sub(r'!\[.*?\]\([^)]+\)', '', text)
+            text = re.sub(r'#+\s*', '', text)
+            text = re.sub(r'\*+', '', text)
+            text = re.sub(r'\n+', ' ', text)
+            # 후처리 적용
+            return clean_article_text(text)
 
-        # 3) 기자 + 이메일 라인 → 여기서 본문 끝
-        if "기자" in txt and "@" in txt:
-            break
-
-        # 4) 하단 홍보/저작권 패턴 → 종료
-        if any(pat in txt for pat in END_PATTERNS):
-            break
-
-        # 5) 추천 기사 리스트 (▶ 로 시작) → 종료
-        if txt.startswith("▶"):
-            break
-
-        lines.append(txt)
-
-    return " ".join(lines)
+        return ""
+    except Exception as e:
+        print(f"    [Firecrawl 실패] {e}")
+        return ""
 
 
-# =========================
-# 4. 기사 링크로 들어가서 요약 재료 뽑기
-# =========================
-
-def build_snippet_from_link(link: str) -> str:
-    """
-    기사 링크의 HTML을 열어서 '요약 재료' 텍스트를 만들어 반환.
-    - news.nate.com: 전용 extract_nate_body 사용 (본문 위주)
-    - 기타: og:description / meta[name=description] / 첫 번째 <p> 텍스트
-    """
+def build_snippet_from_link_legacy(link: str) -> str:
+    """기존 BeautifulSoup 기반 추출 (폴백용)"""
     if not link:
         return ""
 
@@ -125,178 +155,228 @@ def build_snippet_from_link(link: str) -> str:
         resp = requests.get(link, headers=headers, timeout=7)
         resp.raise_for_status()
     except Exception as e:
-        print(f"[경고] 기사 요청 실패 ({link}): {e}")
+        print(f"    [Legacy 실패] {e}")
         return ""
 
     try:
         soup = BeautifulSoup(resp.text, "html.parser")
-        domain = urlparse(link).netloc
 
-        # 🔹 1) nate 뉴스면 본문을 최대한 활용
-        if "news.nate.com" in domain:
-            container = soup.find(id="realArtcContents") or soup.find(id="realArtContents")
-            if container:
-                body_text = extract_nate_body(container)
-                if body_text:
-                    return _clean_text(body_text)
-
-        # 🔹 2) 그 외: 메타 태그 / 첫 단락 기반
-        # 2-1) og:description
         og = soup.find("meta", attrs={"property": "og:description"})
         if og and og.get("content"):
-            return _clean_text(og["content"])
+            return clean_article_text(og["content"])
 
-        # 2-2) meta name="description"
         md = soup.find("meta", attrs={"name": "description"})
         if md and md.get("content"):
-            return _clean_text(md["content"])
-
-        # 2-3) 첫 번째 <p>
-        first_p = soup.find("p")
-        if first_p and first_p.get_text(strip=True):
-            return _clean_text(first_p.get_text(strip=True))
+            return clean_article_text(md["content"])
 
         return ""
     except Exception as e:
-        print(f"[경고] HTML 파싱 실패 ({link}): {e}")
+        print(f"    [Legacy 파싱 실패] {e}")
+        return ""
+
+
+def fetch_article_content(url: str) -> str:
+    """기사 본문 추출 (Firecrawl 우선, 폴백 지원)"""
+    if not url:
+        return ""
+
+    if FIRECRAWL_API_KEY:
+        content = scrape_with_firecrawl(url)
+        if content and len(content) > 100:
+            return content
+
+    return build_snippet_from_link_legacy(url)
+
+
+def fetch_article_image(url: str) -> str:
+    """기사 og:image URL 추출"""
+    if not url:
+        return ""
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+    }
+
+    try:
+        resp = requests.get(url, headers=headers, timeout=7)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        # og:image 찾기
+        og_image = soup.find("meta", attrs={"property": "og:image"})
+        if og_image and og_image.get("content"):
+            return og_image["content"]
+
+        # twitter:image 폴백
+        tw_image = soup.find("meta", attrs={"name": "twitter:image"})
+        if tw_image and tw_image.get("content"):
+            return tw_image["content"]
+
+        return ""
+    except Exception as e:
+        print(f"    [이미지 URL 추출 실패] {e}")
+        return ""
+
+
+def fetch_keyword_image(summary_url: str) -> str:
+    """키워드 요약 페이지에서 관련 뉴스 이미지 추출"""
+    if not summary_url or not FIRECRAWL_API_KEY:
+        return ""
+
+    headers = {
+        "Authorization": f"Bearer {FIRECRAWL_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "url": summary_url,
+        "formats": ["html"],
+        "waitFor": 3000,
+        "timeout": 30000
+    }
+
+    try:
+        resp = requests.post(
+            FIRECRAWL_API_URL,
+            headers=headers,
+            json=payload,
+            timeout=35
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        if not data.get("success"):
+            return ""
+
+        html = data.get("data", {}).get("html", "")
+
+        # 네이버 뉴스 링크 추출
+        import re
+        naver_links = re.findall(r'https://n\.news\.naver\.com/[^"\'>\s]+', html)
+
+        if naver_links:
+            # 첫 번째 뉴스에서 og:image 추출
+            return fetch_article_image(naver_links[0])
+
+        return ""
+    except Exception as e:
+        print(f"    [키워드 이미지 추출 실패] {e}")
         return ""
 
 
 # =========================
-# 5. 뉴스 Top10 + 3-3-4 그룹 만들기
-# =========================
-
-def build_news_top10(api_articles):
-    """
-    signal.bz 'articles' 배열에서 상위 10개를 뽑아
-    [{rank, title, url, snippet}] 리스트로 반환
-    """
-    news_items = []
-    for idx, item in enumerate(api_articles[:10], start=1):
-        title = (item.get("title") or "").strip()
-        url = (item.get("link") or "").strip()
-        print(f"\n[INFO] ({idx}) 기사 처리 중: {title[:50]}")
-
-        snippet = build_snippet_from_link(url)
-        if not snippet:
-            print("  -> [주의] 본문/요약을 가져오지 못했습니다.")
-        else:
-            print("  -> [OK] snippet 길이:", len(snippet))
-
-        news_items.append(
-            {
-                "rank": idx,
-                "title": title,
-                "url": url,
-                "snippet": snippet,
-            }
-        )
-
-    return news_items
-
-
-def group_news_3_3_4(news_items):
-    """
-    Top10 뉴스 리스트를 3-3-4로 그룹 나누기
-      - 1그룹: 1~3
-      - 2그룹: 4~6
-      - 3그룹: 7~10
-    """
-    groups = []
-
-    if len(news_items) >= 3:
-        groups.append(news_items[0:3])   # 1~3
-    if len(news_items) >= 6:
-        groups.append(news_items[3:6])   # 4~6
-    if len(news_items) > 6:
-        groups.append(news_items[6:10])  # 7~10 (최대 4개)
-
-    return groups
-
-
-# =========================
-# 6. 콘솔 출력용 포맷 (ChatGPT에 붙여넣기용)
-# =========================
-
-def print_groups_for_prompt(groups):
-    """
-    ChatGPT에 바로 붙여넣기 좋은 형식으로
-    [뉴스 n 제목] / [뉴스 n 요약] 형태 출력
-    """
-    for gi, group in enumerate(groups, start=1):
-        print("\n" + "=" * 60)
-        print(f"=== 뉴스 그룹 {gi} (총 {len(group)}개) ===")
-        print("=" * 60)
-
-        for item in group:
-            r = item["rank"]
-            title = item["title"]
-            snippet = item["snippet"]
-
-            print(f"\n[뉴스 {r} 제목]\n{title}")
-            print(f"\n[뉴스 {r} 요약]\n{snippet}\n")
-
-
-# =========================
-# 7. 메인 실행부
+# 4. 메인 실행부
 # =========================
 
 if __name__ == "__main__":
     # 출력 디렉토리 준비
-    os.makedirs("output", exist_ok=True)
+    os.makedirs("output/news", exist_ok=True)
 
-    # 1단계: 데이터 수집
+    # API 데이터 수집
     api_data = scrape_signal_api()
     if not api_data:
-        print("\n--- 1단계 실패: API 데이터를 가져오지 못했습니다. ---")
+        print("\n[에러] API 데이터를 가져오지 못했습니다.")
         exit(1)
 
     # -------------------
-    # (A) 실검 TOP 10 키워드
+    # (A) 실시간 검색어 TOP 10 - 단일 파일 저장
     # -------------------
+    print("\n" + "=" * 50)
+    print("실시간 검색어 TOP 10 수집")
+    print("=" * 50)
+
     realtime = api_data.get("top10", [])
-    keywords_list = [item["keyword"] for item in realtime][:10]
+    keywords = []
 
-    if len(keywords_list) == 10:
-        print("\n===== 실시간 검색어 TOP 10 =====")
-        for i, kw in enumerate(reversed(keywords_list), start=1):
-            # 10위부터 1위까지 보고 싶으면 reversed 사용
-            print(f"{11 - i}위: {kw}")
-        # JSON 파일로도 저장
-        with open("output/realtime_top10_keywords.json", "w", encoding="utf-8") as f:
-            json.dump(keywords_list, f, ensure_ascii=False, indent=2)
-        print("✅ 실시간 검색어 키워드 저장: output/realtime_top10_keywords.json")
-    else:
-        print("[경고] 실검 키워드가 10개 미만입니다.")
+    for i, item in enumerate(realtime[:10], start=1):
+        keyword = item.get("keyword", "")
+        summary_url = item.get("summary", "")
+
+        print(f"\n  [{i}/10] {keyword}")
+
+        # 관련 뉴스 이미지 추출
+        image_url = ""
+        if summary_url:
+            image_url = fetch_keyword_image(summary_url)
+            if image_url:
+                print(f"    -> 이미지 URL 확인")
+            else:
+                print(f"    -> 이미지 없음")
+
+        keywords.append({
+            "rank": i,
+            "keyword": keyword,
+            "image_url": image_url
+        })
+
+    # 단일 파일로 저장
+    with open("output/keywords.json", "w", encoding="utf-8") as f:
+        json.dump(keywords, f, ensure_ascii=False, indent=2)
+
+    print(f"\n저장됨: output/keywords.json")
 
     # -------------------
-    # (B) 인기 뉴스 10개 + 3-3-4 그룹
+    # (B) 인기 뉴스 TOP 10 - 개별 저장 (본문 포함)
     # -------------------
+    print("\n" + "=" * 50)
+    print("인기 뉴스 TOP 10 수집")
+    print("=" * 50)
+
     articles = api_data.get("articles", [])
-    if not articles:
-        print("[경고] 'articles' 데이터가 없어 뉴스 처리를 건너뜁니다.")
-        exit(0)
+    news_list = []
 
-    print(f"\n--- 인기 뉴스 총 {len(articles)}개 중 상위 10개 사용 ---")
-    news_top10 = build_news_top10(articles)
+    for i, item in enumerate(articles[:10], start=1):
+        title = (item.get("title") or "").strip()
+        url = (item.get("link") or "").strip()
 
-    # Top10 전체를 JSON으로 저장
-    with open("output/news_top10.json", "w", encoding="utf-8") as f:
-        json.dump(news_top10, f, ensure_ascii=False, indent=2)
-    print("✅ Top10 뉴스 저장: output/news_top10.json")
+        print(f"\n[{i}/10] {title[:40]}...")
 
-    # 3-3-4 그룹 나누기
-    groups = group_news_3_3_4(news_top10)
-    print(f"--- 3-3-4 뉴스 그룹 수: {len(groups)} ---")
+        # 본문 수집
+        content = fetch_article_content(url)
 
-    # 각 그룹별 JSON 저장 + 콘솔 출력
-    for gi, group in enumerate(groups, start=1):
-        path = f"output/news_group_{gi:02d}.json"
+        # 이미지 URL 수집
+        image_url = fetch_article_image(url)
+
+        if content:
+            print(f"    -> 본문 성공 ({len(content)}자)")
+        else:
+            print(f"    -> 본문 수집 실패")
+
+        if image_url:
+            print(f"    -> 이미지 URL 확인")
+        else:
+            print(f"    -> 이미지 없음")
+
+        news_data = {
+            "rank": i,
+            "title": title,
+            "url": url,
+            "content": content,
+            "image_url": image_url
+        }
+        news_list.append(news_data)
+
+        # 개별 파일 저장
+        path = f"output/news/news_{i:02d}.json"
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(group, f, ensure_ascii=False, indent=2)
-        print(f"✅ 뉴스 그룹 {gi} 저장: {path}")
+            json.dump(news_data, f, ensure_ascii=False, indent=2)
 
-    # 프롬프트에 붙여넣기 좋은 형식으로 콘솔 출력
-    print_groups_for_prompt(groups)
+    print(f"\n저장됨: output/news/news_01~10.json")
 
-    print("\n--- 🚀 모든 작업 완료 (실검 + 뉴스 3-3-4 그룹 정리) ---")
+    # -------------------
+    # 완료 메시지
+    # -------------------
+    success_count = len([n for n in news_list if n["content"]])
+
+    print("\n" + "=" * 50)
+    print("수집 완료!")
+    print("=" * 50)
+    print(f"검색어: {len(keywords)}개")
+    print(f"뉴스: {success_count}/{len(news_list)}개 본문 수집 성공")
+    print(f"\n저장 위치:")
+    print(f"  - output/keywords.json")
+    print(f"  - output/news/news_01~10.json")

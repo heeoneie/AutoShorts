@@ -178,6 +178,7 @@ def generate_keyword_images(keywords_path: Path, output_dir: Path) -> int:
 
 SCRIPTS_DIR = OUTPUT_DIR / "scripts"
 VIDEO_DURATION = 30  # 영상 길이 (초)
+MAX_IMAGES_PER_NEWS = 12  # 최대 이미지 개수
 
 
 def plan_image_scenes_with_ai(script_data: dict) -> list[dict]:
@@ -196,23 +197,24 @@ def plan_image_scenes_with_ai(script_data: dict) -> list[dict]:
         text = part.get("text", "")
         script_text += f"[{part_type}] {text}\n"
 
-    system_prompt = """You are a visual director for YouTube Shorts news videos.
+    system_prompt = f"""You are a visual director for YouTube Shorts news videos.
 Given a script for a 30-second news video, plan the visual scenes.
 
 Rules:
 - Each image will be shown for 3-5 seconds with Ken Burns effect
-- Determine the optimal number of images (typically 5-10 for 30 seconds)
+- Maximum {MAX_IMAGES_PER_NEWS} images (minimum 3 seconds per image)
+- Optimal range: 5-8 images for good pacing
 - Each scene should match the script's narrative flow
-- Consider visual variety and storytelling
+- IMPORTANT: Describe visual elements only, NO text overlays
 
 Output JSON format:
-{
+{{
   "total_images": <number>,
   "scenes": [
-    {"seq": 1, "duration": 4, "description": "Detailed scene description for image generation"},
+    {{"seq": 1, "duration": 4, "description": "Detailed visual scene description (no text)"}},
     ...
   ]
-}
+}}
 
 IMPORTANT: Output valid JSON only, no explanation."""
 
@@ -237,7 +239,9 @@ Create a scene plan with appropriate number of images."""
             max_tokens=2000
         )
         result = json.loads(response.choices[0].message.content)
-        return result.get("scenes", [])
+        scenes = result.get("scenes", [])
+        # 최대 개수 제한 적용
+        return scenes[:MAX_IMAGES_PER_NEWS]
     except Exception as e:
         print(f"    [AI 씬 계획 실패] {e}")
         # 폴백: 기본 5장

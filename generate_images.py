@@ -198,25 +198,42 @@ def plan_image_scenes_with_ai(script_data: dict) -> list[dict]:
         script_text += f"[{part_type}] {text}\n"
 
     system_prompt = f"""You are a visual director for YouTube Shorts news videos.
-Given a script for a 30-second news video, plan the visual scenes.
+Given a script for a 30-second news video, plan the visual scenes using the 6-Element Method.
+
+6-Element Method for Image Generation (CRITICAL):
+Each scene description MUST include ALL 6 elements:
+1. Subject: Main character/object (age, appearance, expression, clothing)
+2. Action: What the subject is doing (pose, movement, interaction)
+3. Environment: Setting/background (location, props, atmosphere)
+4. Style: Visual aesthetic (cinematic, dramatic, professional Korean news broadcast)
+5. Lighting: Light setup (soft key light, rim light, studio quality, shadows)
+6. Details: Technical specs (9:16 vertical, sharp focus, bokeh, high resolution)
+
+Example format:
+"Subject: Korean actor in 30s, thoughtful expression, wearing casual blazer
+Action: Looking at camera with reflective gaze, slight head tilt to right
+Environment: Modern TV studio, blurred professional background, indoor setting
+Style: Cinematic Korean news broadcast, dramatic and professional tone
+Lighting: Soft key light from 45-degree angle, subtle rim lighting for depth
+Details: Vertical 9:16 ratio, sharp focus on face, bokeh background"
 
 Rules:
-- Each image will be shown for 3-5 seconds with Ken Burns effect
-- Maximum {MAX_IMAGES_PER_NEWS} images (minimum 3 seconds per image)
-- Optimal range: 5-8 images for good pacing
-- Each scene should match the script's narrative flow
-- IMPORTANT: Describe visual elements only, NO text overlays
+- Each image shown for 3-5 seconds with motion effects
+- Maximum {MAX_IMAGES_PER_NEWS} images (minimum 3 seconds each)
+- Optimal: 5-8 images for good pacing
+- Match script's narrative flow
+- NO text/words in images
 
-Output JSON format:
+Output JSON:
 {{
   "total_images": <number>,
   "scenes": [
-    {{"seq": 1, "duration": 4, "description": "Detailed visual scene description (no text)"}},
+    {{"seq": 1, "duration": 4, "description": "Subject:... Action:... Environment:... Style:... Lighting:... Details:..."}},
     ...
   ]
 }}
 
-IMPORTANT: Output valid JSON only, no explanation."""
+IMPORTANT: JSON only, no explanation."""
 
     user_prompt = f"""Plan visual scenes for this 30-second news video:
 
